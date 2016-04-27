@@ -35,20 +35,20 @@ func main() {
 
 func newPusher(addr string) *pusher {
 	p := &pusher{
-		q: make(chan payload, 1000),
+		q: make(chan event, 10000),
 	}
 	go p.process(addr)
 	return p
 }
 
 type pusher struct {
-	q chan payload
+	q chan event
 }
 
 func (p *pusher) process(addr string) {
 	var cl *redis.Client
 	var err error
-	var out []payload
+	out := make(map[event]struct{})
 	ticker := time.NewTicker(5 * time.Second)
 
 reconnect:
@@ -67,12 +67,10 @@ reconnect:
 			if len(out) == 0 {
 				continue
 			}
-			for _, v := range out {
-				sid := strconv.Itoa(int(v.UID))
-				for _, evt := range v.Events {
-					for _, f := range []keyFunc{mKey, wKey, dKey} {
-						cl.PipeAppend("SETBIT", f(evt, now), sid, "1")
-					}
+			for v := range out {
+				sid := strconv.Itoa(int(v.uid))
+				for _, f := range []keyFunc{mKey, wKey, dKey} {
+					cl.PipeAppend("SETBIT", f(v.evt, now), sid, "1")
 				}
 			}
 		drainResponse:
@@ -90,13 +88,9 @@ reconnect:
 					goto reconnect
 				}
 			}
-			maxcap := cap(out)
-			if maxcap > 500 {
-				maxcap = 500
-			}
-			out = out[:0:maxcap]
-		case msg := <-p.q:
-			out = append(out, msg)
+			out = make(map[event]struct{})
+		case evt := <-p.q:
+			out[evt] = struct{}{}
 		}
 	}
 }
@@ -119,14 +113,24 @@ func (p *pusher) handleUDP(addr string) error {
 			if msgpack.Unmarshal((*bufp)[:n], &data) != nil {
 				return
 			}
-			select {
-			case p.q <- data:
-			default:
+			for _, e := range data.Events {
+				evt := event{data.UID, e}
+				select {
+				case p.q <- evt:
+				default:
+				}
 			}
 		}(p, n, bufp)
 	}
 }
 
+// event presents a single user event
+type event struct {
+	uid uint32
+	evt string
+}
+
+// payload is a message received by UDP listener, may hold multiple events of a single user
 type payload struct {
 	UID    uint32   `msgpack:"id"`
 	Events []string `msgpack:"ev"`
