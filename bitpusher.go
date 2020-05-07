@@ -53,7 +53,7 @@ func (p *pusher) process(addr string) {
 
 reconnect:
 	for {
-		cl, err = redis.DialTimeout("tcp", addr, 15*time.Second)
+		cl, err = redisDial(addr)
 		if err != nil {
 			log.Print(err)
 			time.Sleep(5 * time.Second)
@@ -150,4 +150,23 @@ var bufPool = sync.Pool{
 		buf := make([]byte, 4096)
 		return &buf
 	},
+}
+
+func redisDial(addr string) (*redis.Client, error) {
+	const timeout = 15 * time.Second
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if tc, ok := conn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(time.Minute)
+	}
+	cl, err := redis.NewClient(conn)
+	if err != nil {
+		return nil, err
+	}
+	cl.ReadTimeout = timeout
+	cl.WriteTimeout = timeout
+	return cl, nil
 }
