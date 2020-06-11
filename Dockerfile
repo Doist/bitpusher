@@ -8,3 +8,5 @@ RUN go build -ldflags='-s -w'
 
 FROM scratch
 COPY --from=builder /app/bitpusher /
+# workaround for Fargate 1.4.0 issue (Case ID 7085446141)
+WORKDIR /etc
