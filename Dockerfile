@@ -1,10 +1,11 @@
-FROM golang:alpine AS builder
+FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/golang:alpine AS builder
 WORKDIR /app
-ENV GOPROXY=https://proxy.golang.org CGO_ENABLED=0
+ENV CGO_ENABLED=0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN go build -ldflags='-s -w'
+ARG TARGETARCH
+RUN GOARCH=$TARGETARCH go build
 
 FROM scratch
 COPY --from=builder /app/bitpusher /
