@@ -1,0 +1,37 @@
+# Local dependencies for developing bitpusher:
+#   - bitmapist: a Redis instance to receive the SETBIT writes
+#   - dd-agent:  a DogStatsD-enabled Datadog agent to receive metrics on :8125/udp
+#
+# bitpusher itself runs on the host via `go run` (see README.md) so code changes
+# are instant. Requires a .env file with DD_API_KEY (see .env.example).
+services:
+  bitmapist:
+    image: redis:7
+    ports: ["6379:6379"]
+
+  dd-agent:
+    image: gcr.io/datadoghq/agent:7
+    environment:
+      DD_API_KEY: ${DD_API_KEY:?set DD_API_KEY in .env}
+      DD_SITE: datadoghq.com            # confirm Doist's Datadog site
+      DD_HOSTNAME: bitpusher-local      # required: the agent can't infer a hostname in a plain container
+      DD_ENV: development               # supplies the required `env` tag locally
+      # NB: don't set project here. bitpusher tags metrics with project:<-project> itself;
+      # a DD_TAGS project:... would attach a second, possibly conflicting, project tag.
+      DD_DOGSTATSD_NON_LOCAL_TRAFFIC: "true"
+      DD_DOGSTATSD_METRICS_STATS_ENABLE: "true"  # lets `agent dogstatsd-stats` show per-metric counts locally
+      DD_APM_ENABLED: "false"
+    ports: ["127.0.0.1:8125:8125/udp"]
+
+  # Optional: run bitpusher itself as a container on the same network, sending to
+  # the agent over Docker DNS (dd-agent:8125). Use this on macOS, where host->container
+  # UDP forwarding is unreliable, or to mirror the production sidecar topology.
+  #   docker-compose --profile full up -d --build
+  bitpusher:
+    profiles: ["full"]
+    build:
+      context: .
+      args:
+        VERSION: local
+    command: ["/bitpusher", "-l=0.0.0.0:25800", "-b=bitmapist:6379", "-statsd=dd-agent:8125", "-project=todoist"]
+    depends_on: [bitmapist, dd-agent]

@@ -1,0 +1,10 @@
+# Local Datadog API key for docker-compose — never copy into the build context
+.env
+
+# Host-built binary (the image builds its own)
+/bitpusher
+
+# Not needed in the image build
+README.md
+docker-compose.yml
+.env.example

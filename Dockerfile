@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG TARGETARCH
-RUN GOARCH=$TARGETARCH go build
+ARG VERSION=dev
+RUN GOARCH=$TARGETARCH go build -ldflags "-X main.version=$VERSION"
 
 FROM scratch
 COPY --from=builder /app/bitpusher /

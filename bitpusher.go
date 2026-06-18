@@ -10,15 +10,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DataDog/datadog-go/v5/statsd"
 	"github.com/artyom/autoflags"
 	"github.com/mediocregopher/radix.v2/redis"
 	"gopkg.in/vmihailenco/msgpack.v2"
 )
 
+// version is attached to every metric as a `version:` tag
+// https://handbook.doist.com/doc/standard-observability-vWRaOfitho
+// It is injected at build time via -ldflags "-X main.version=..." (see the
+// Dockerfile); a build that omits it falls back to "dev"
+var version = "dev"
+
 func main() {
 	params := struct {
-		RedisAddr string `flag:"b,bitmapist address"`
-		Addr      string `flag:"l,udp address to listen at"`
+		RedisAddr  string `flag:"b,bitmapist address"`
+		Addr       string `flag:"l,udp address to listen at"`
+		StatsdAddr string `flag:"statsd,dogstatsd address for metrics (empty disables)"`
+		Project    string `flag:"project,product this deployment serves, added as a project:<value> metric tag, e.g. todoist, comms, automations"`
 	}{
 		RedisAddr: "localhost:6379",
 		Addr:      "localhost:25800",
@@ -29,13 +38,41 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	p := newPusher(params.RedisAddr)
-	log.Fatal(p.handleUDP(params.Addr))
+
+	// Metrics are optional. With no -statsd address we use a no-op client so the
+	// emit sites stay unconditional (no nil checks) and never touch the network.
+	var m statsd.ClientInterface = &statsd.NoOpClient{}
+	if params.StatsdAddr != "" {
+		tags := []string{"service:bitpusher", "version:" + version}
+		if params.Project != "" {
+			tags = append(tags, "project:"+params.Project)
+		}
+		c, err := statsd.New(params.StatsdAddr,
+			statsd.WithNamespace("bitpusher"), // prefixes every metric name
+			statsd.WithTags(tags),             // attached to every metric
+			statsd.WithChannelMode(),          // drop metrics rather than block if the buffer fills
+		)
+
+		if err != nil {
+			log.Printf("metrics disabled: %v", err)
+		} else {
+			m = c
+		}
+	}
+
+	log.Printf("bitpusher version=%s listening on %s -> bitmapist %s (statsd=%q project=%q)",
+		version, params.Addr, params.RedisAddr, params.StatsdAddr, params.Project)
+
+	p := newPusher(params.RedisAddr, m)
+	err := p.handleUDP(params.Addr)
+	m.Close() // flush buffered metrics before exiting
+	log.Fatal(err)
 }
 
-func newPusher(addr string) *pusher {
+func newPusher(addr string, m statsd.ClientInterface) *pusher {
 	p := &pusher{
 		q: make(chan event, 10000),
+		m: m,
 	}
 	go p.process(addr)
 	return p
@@ -43,6 +80,7 @@ func newPusher(addr string) *pusher {
 
 type pusher struct {
 	q chan event
+	m statsd.ClientInterface
 }
 
 func (p *pusher) process(addr string) {
@@ -64,6 +102,7 @@ reconnect:
 	for {
 		select {
 		case now := <-ticker.C:
+			p.m.Gauge("queue_depth", float64(len(p.q)), nil, 1)
 			if len(out) == 0 {
 				continue
 			}
@@ -88,6 +127,9 @@ reconnect:
 					goto reconnect
 				}
 			}
+
+			// Count only after a successful drain.
+			p.m.Count("events_flushed", int64(len(out)), nil, 1)
 			out = make(map[event]struct{})
 		case evt := <-p.q:
 			out[evt] = struct{}{}
@@ -111,13 +153,16 @@ func (p *pusher) handleUDP(addr string) error {
 			defer bufPool.Put(bufp)
 			var data payload
 			if msgpack.Unmarshal((*bufp)[:n], &data) != nil {
+				p.m.Incr("decode_errors", nil, 1)
 				return
 			}
+			p.m.Count("events_received", int64(len(data.Events)), nil, 1)
 			for _, e := range data.Events {
 				evt := event{data.UID, e}
 				select {
 				case p.q <- evt:
 				default:
+					p.m.Incr("events_dropped", nil, 1)
 				}
 			}
 		}(p, n, bufp)

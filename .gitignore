@@ -1,0 +1,5 @@
+# Local Datadog API key for docker-compose
+.env
+
+# Compiled binary
+/bitpusher
